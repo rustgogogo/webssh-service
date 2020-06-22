@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/ssh"
@@ -9,8 +10,19 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strconv"
 	"time"
 )
+
+/**
+设备信息表
+*/
+var deviceInfoList map[string]*DeviceInfo = make(map[string]*DeviceInfo)
+
+/**
+默认ssh地址，只支持本地
+*/
+const defaultSshIp = "127.0.0.1"
 
 /**
 websocket接口
@@ -24,12 +36,36 @@ func WebsshApi(c *gin.Context) {
 	} else {
 		//客户端连接后获取参数
 		deviceId := c.Query("deviceId")
-		if len(deviceId) == 0 {
-			logger.Warn().Msg("websocket设备id为空")
+		user := c.Query("user")
+		pwd := c.Query("pwd")
+		portStr := c.Query("port")
+		host := c.Query("host")
+
+		if len(deviceId) == 0 || len(user) == 0 || len(pwd) == 0 || len(portStr) == 0 {
+			logger.Warn().Msg("websocket参数为空")
 			conn.Close()
 		} else {
-			logger.Debug().Str("deviceId", deviceId).Str("ip", c.ClientIP()).Str("ua", c.Request.UserAgent()).Msg("websocket连接成功，开始建立ws<->ssh隧道")
-			go Ws2ssh(conn, deviceId)
+			port, err := strconv.Atoi(portStr)
+			if err != nil {
+				logger.Warn().Msg("websocket端口参数不合法")
+				conn.Close()
+			} else {
+				//如果有host参数，那么就使用host参数作为连接的ssh主机地址
+				ip := defaultSshIp
+				if len(host) > 0 {
+					ip = host
+				}
+				deviceInfoList[deviceId] = &DeviceInfo{
+					DeviceId: deviceId,
+					SshPort:  port,
+					Ip:       ip,
+					SshUser:  user,
+					SshPwd:   pwd,
+				}
+
+				logger.Debug().Str("deviceId", deviceId).Str("ip", c.ClientIP()).Str("ua", c.Request.UserAgent()).Msg("websocket连接成功，开始建立ws<->ssh隧道")
+				go Ws2ssh(conn, deviceId)
+			}
 		}
 	}
 }
@@ -39,16 +75,20 @@ func WebsshApi(c *gin.Context) {
 应该从数据库读取
 */
 func getSshConfigByDeviceId(deviceId string) (string, *ssh.ClientConfig) {
+	deviceInfo := deviceInfoList[deviceId]
+	if deviceInfo == nil {
+		return "", nil
+	}
 	sshConfig := &ssh.ClientConfig{
-		User: "pi",
+		User: deviceInfo.SshUser,
 		Auth: []ssh.AuthMethod{
-			ssh.Password("123456"),
+			ssh.Password(deviceInfo.SshPwd),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		ClientVersion:   "",
 		Timeout:         10 * time.Second,
 	}
-	return "192.168.1.8:22", sshConfig
+	return fmt.Sprintf("%s:%d", deviceInfo.Ip, deviceInfo.SshPort), sshConfig
 }
 
 /**
